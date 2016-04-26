@@ -45,6 +45,7 @@
 #define DEF_NODE "localhost"
 #define DEF_SERVICE "8125"
 
+#define DEF_PERIOD        100
 #define DEF_NUM_COUNTERS  1000
 #define DEF_NUM_TIMERS    1000
 #define DEF_NUM_GAUGES     100
@@ -52,6 +53,7 @@
 #define DEF_SET_SIZE       128
 
 static int conf_num_counters = DEF_NUM_COUNTERS;
+static int conf_period       = DEF_PERIOD;
 static int conf_num_timers   = DEF_NUM_TIMERS;
 static int conf_num_gauges   = DEF_NUM_GAUGES;
 static int conf_num_sets     = DEF_NUM_SETS;
@@ -68,6 +70,62 @@ static unsigned long long events_sent = 0;
 pthread_mutex_t events_sent_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Bool loop = 1;
 
+struct periodic_info
+{
+  int timer_fd;
+  unsigned long long wakeups_missed;
+};
+
+
+static int make_periodic (unsigned int period, struct periodic_info *info)
+{
+  int ret;
+  unsigned int ns;
+  unsigned int sec;
+  int tfd;
+  struct itimerspec itval;
+
+  /* Create the timer */
+  tfd = timerfd_create (CLOCK_MONOTONIC, 0);
+  info->wakeups_missed = 0;
+  info->timer_fd = tfd;
+  if (tfd == -1)
+    return tfd;
+
+  period = period * conf_threads_num;
+  /* Make the timer periodic */
+  sec = period/1000000;
+  ns = (period - (sec * 1000000)) * 1000;
+  itval.it_interval.tv_sec = sec;
+  itval.it_interval.tv_nsec = ns;
+  itval.it_value.tv_sec = sec;
+  itval.it_value.tv_nsec = ns;
+  ret = timerfd_settime (tfd, 0, &itval, NULL);
+  return ret;
+}
+
+
+static void wait_period (struct periodic_info *info)
+{
+  unsigned long long missed;
+  int ret;
+
+  /* Wait for the next timer event. If we have missed any the
+     number is written to "missed" */
+  ret = read (info->timer_fd, &missed, sizeof (missed));
+  if (ret == -1)
+  {
+    perror ("read timer");
+    return;
+  }
+
+  /* "missed" should always be >= 1, but just to be sure, check it is not 0 anyway */
+  if (missed > 0) {
+    info->wakeups_missed += (missed - 1);
+  }
+
+}
+
 __attribute__((noreturn))
 static void exit_usage (int exit_status) /* {{{ */
 {
@@ -77,6 +135,7 @@ static void exit_usage (int exit_status) /* {{{ */
       "  Usage: statsd-tg [OPTION]\n"
       "\n"
       "  Valid options:\n"
+      "    -p <number>    Clock frequency for generating events in microseconds. (Default: %i)\n"
       "    -c <number>    Number of counters to emulate. (Default: %i)\n"
       "    -t <number>    Number of timers to emulate. (Default: %i)\n"
       "    -g <number>    Number of gauges to emulate. (Default: %i)\n"
@@ -249,12 +308,16 @@ static int read_options (int argc, char **argv) /* {{{ */
   conf_threads_num = (int) sysconf (_SC_NPROCESSORS_ONLN);
 #endif
 
-  while ((opt = getopt (argc, argv, "c:t:g:s:S:d:D:T:h")) != -1)
+  while ((opt = getopt (argc, argv, "c:p:t:g:s:S:d:D:T:h")) != -1)
   {
     switch (opt)
     {
       case 'c':
         get_integer_opt (optarg, &conf_num_counters);
+        break;
+
+      case 'p':
+        get_integer_opt (optarg, &conf_period);
         break;
 
       case 't':
@@ -299,8 +362,10 @@ static int read_options (int argc, char **argv) /* {{{ */
 static void *send_thread (void *args __attribute__((unused))) /* {{{ */
 {
   int sock;
+  int missed;
   unsigned short seed[3];
   struct timespec ts;
+  struct periodic_info pinfo;
 
   unsigned long long local_events_sent = 0;
 
@@ -310,9 +375,11 @@ static void *send_thread (void *args __attribute__((unused))) /* {{{ */
   seed[0] = (unsigned short) (ts.tv_sec);
 
   sock = sock_open ();
+  make_periodic (conf_period, &pinfo);
 
   while (loop)
   {
+    wait_period (&pinfo);
     send_random_event (sock, seed);
     local_events_sent++;
   }
