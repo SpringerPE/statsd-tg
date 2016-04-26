@@ -9,6 +9,23 @@ About
   can be used to stress-test / benchmark StatsD implementations and possibly
   perform profiling.
 
+Install
+-------
+
+  Here is the installation on ubuntu:
+
+  1) sudo ap-get install autoconf automake intltool
+  2) git clone the statsd-tg repository
+  3) move inside the statsd-tg folder and create the po folder: mkdir po
+  4) aclocal
+  5) autoheader
+  6) intltoolize --automake --copy --force
+  7) automake --add-missing --copy
+  8) autoconf
+  9) ./configure
+  10) make
+  11) sudo make install
+
 
 Operation
 ━━━━━━━━━
